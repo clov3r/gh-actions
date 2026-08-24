@@ -243,6 +243,7 @@ jobs:
     if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_go_test == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         dir: ${{ fromJson(needs.config.outputs.go_test_json).dirs }}
     steps:
@@ -329,6 +330,7 @@ jobs:
     if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_extra_checks == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         check: ${{ fromJson(needs.config.outputs.extra_checks_json) }}
     steps:
