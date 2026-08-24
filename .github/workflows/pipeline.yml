@@ -4,13 +4,17 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: "Pipeline environment"
+        description: "Pipeline environment: pr, dev, qa, preproduction, production"
         type: string
         required: true
       version_override:
-        description: "Force a specific version"
+        description: "Force a specific version (production only)"
         type: string
         default: ""
+    outputs:
+      version:
+        description: "Resolved version tag"
+        value: ${{ jobs.version.outputs.version }}
     secrets:
       DOCKER_USERNAME:
         required: false
@@ -27,10 +31,32 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ─── Load config from .github/pipeline.yml in the caller repo ───
   config:
     runs-on: ubuntu-latest
     outputs:
       service_name: ${{ steps.parse.outputs.service_name }}
+      release_name: ${{ steps.parse.outputs.release_name }}
+      images_json: ${{ steps.enrich.outputs.images_json || steps.parse.outputs.images_json }}
+      go_test_json: ${{ steps.parse.outputs.go_test_json }}
+      node_test_json: ${{ steps.parse.outputs.node_test_json }}
+      e2e_json: ${{ steps.parse.outputs.e2e_json }}
+      extra_checks_json: ${{ steps.parse.outputs.extra_checks_json }}
+      deploy_envs_json: ${{ steps.parse.outputs.deploy_envs_json }}
+      has_tests: ${{ steps.parse.outputs.has_tests }}
+      has_go_test: ${{ steps.parse.outputs.has_go_test }}
+      has_node_test: ${{ steps.parse.outputs.has_node_test }}
+      has_e2e: ${{ steps.parse.outputs.has_e2e }}
+      has_extra_checks: ${{ steps.parse.outputs.has_extra_checks }}
+      has_deploy: ${{ steps.parse.outputs.has_deploy }}
+      run_tests: ${{ steps.flags.outputs.run_tests }}
+      run_deploy: ${{ steps.flags.outputs.run_deploy }}
+      run_release: ${{ steps.flags.outputs.run_release }}
+      run_build_push: ${{ steps.flags.outputs.run_build_push }}
+      run_build_check: ${{ steps.flags.outputs.run_build_check }}
+      extra_tag: ${{ steps.flags.outputs.extra_tag }}
+      pre_release_branches: ${{ steps.flags.outputs.pre_release_branches }}
+      build_config_overrides: ${{ steps.flags.outputs.build_config_overrides }}
     steps:
       - uses: actions/checkout@v6
 
@@ -40,16 +66,516 @@ jobs:
         run: |
           CONFIG=".github/pipeline.yml"
           if [ ! -f "$CONFIG" ]; then
-            echo "::error::Missing $CONFIG"
+            echo "::error::Missing $CONFIG — create it to configure the pipeline"
             exit 1
           fi
+
+          # Install yq for YAML parsing
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
-          echo "service_name=$(yq -r '.service_name' $CONFIG)" >> $GITHUB_OUTPUT
-          echo "Parsed service: $(yq -r '.service_name' $CONFIG)"
 
-  report:
+          # Core fields
+          echo "service_name=$(yq -r '.service_name' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "release_name=$(yq -r '.release_name // .service_name' $CONFIG)" >> $GITHUB_OUTPUT
+
+          # Images — inject environment build_config into images that don't specify their own
+          IMAGES_RAW=$(yq -o=json '.images' $CONFIG | jq -c '.')
+          echo "images_json=$IMAGES_RAW" >> $GITHUB_OUTPUT
+
+          # Tests
+          GO_TEST=$(yq -o=json '.tests.go // null' $CONFIG | jq -c '.')
+          NODE_TEST=$(yq -o=json '.tests.node // null' $CONFIG | jq -c '.')
+          E2E=$(yq -o=json '.tests.e2e // null' $CONFIG | jq -c '.')
+          EXTRA_CHECKS=$(yq -o=json '.tests.extra // null' $CONFIG | jq -c '.')
+
+          echo "go_test_json=$GO_TEST" >> $GITHUB_OUTPUT
+          echo "node_test_json=$NODE_TEST" >> $GITHUB_OUTPUT
+          echo "e2e_json=$E2E" >> $GITHUB_OUTPUT
+          echo "extra_checks_json=$EXTRA_CHECKS" >> $GITHUB_OUTPUT
+
+          echo "has_go_test=$( [ "$GO_TEST" != "null" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "has_node_test=$( [ "$NODE_TEST" != "null" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "has_e2e=$( [ "$E2E" != "null" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "has_extra_checks=$( [ "$EXTRA_CHECKS" != "null" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "has_tests=$( [ "$GO_TEST" != "null" ] || [ "$NODE_TEST" != "null" ] || [ "$E2E" != "null" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+
+          # Deploy environments — check for per-environment overrides first, then defaults
+          ENV="${{ inputs.environment }}"
+          CUSTOM_DEPLOY=$(yq -o=json ".deploy_environments.${ENV} // null" $CONFIG | jq -c '.')
+          if [ "$CUSTOM_DEPLOY" != "null" ]; then
+            echo "deploy_envs_json=$CUSTOM_DEPLOY" >> $GITHUB_OUTPUT
+          else
+            # Default deploy targets by environment
+            SVC=$(yq -r '.service_name' $CONFIG)
+            case "$ENV" in
+              dev)
+                echo "deploy_envs_json=[{\"env\":\"dev\"}]" >> $GITHUB_OUTPUT
+                ;;
+              qa)
+                echo "deploy_envs_json=[{\"env\":\"qa\"}]" >> $GITHUB_OUTPUT
+                ;;
+              preproduction)
+                echo "deploy_envs_json=[{\"env\":\"preproduction\"}]" >> $GITHUB_OUTPUT
+                ;;
+              production)
+                echo "deploy_envs_json=[{\"env\":\"preproduction\"},{\"env\":\"prod\"}]" >> $GITHUB_OUTPUT
+                ;;
+              pr)
+                echo "deploy_envs_json=[]" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          fi
+
+          echo "has_deploy=$( [ "$ENV" != "pr" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+
+      - name: Set environment flags
+        id: flags
+        shell: bash
+        run: |
+          ENV="${{ inputs.environment }}"
+
+          # Environment → behavior matrix
+          # pr:            tests=true,  deploy=false, release=false, build=check
+          # dev:           tests=false, deploy=true,  release=false, build=push
+          # qa:            tests=true,  deploy=true,  release=false, build=push
+          # preproduction: tests=true,  deploy=true,  release=false, build=push
+          # production:    tests=false, deploy=true,  release=true,  build=push
+
+          case "$ENV" in
+            pr)
+              echo "run_tests=true" >> $GITHUB_OUTPUT
+              echo "run_deploy=false" >> $GITHUB_OUTPUT
+              echo "run_release=false" >> $GITHUB_OUTPUT
+              echo "run_build_push=false" >> $GITHUB_OUTPUT
+              echo "run_build_check=true" >> $GITHUB_OUTPUT
+              echo "extra_tag=" >> $GITHUB_OUTPUT
+              echo "pre_release_branches=" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=" >> $GITHUB_OUTPUT
+              ;;
+            dev)
+              echo "run_tests=false" >> $GITHUB_OUTPUT
+              echo "run_deploy=true" >> $GITHUB_OUTPUT
+              echo "run_release=false" >> $GITHUB_OUTPUT
+              echo "run_build_push=true" >> $GITHUB_OUTPUT
+              echo "run_build_check=false" >> $GITHUB_OUTPUT
+              echo "extra_tag=latest-dev" >> $GITHUB_OUTPUT
+              echo "pre_release_branches=dev" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=" >> $GITHUB_OUTPUT
+              ;;
+            qa)
+              echo "run_tests=true" >> $GITHUB_OUTPUT
+              echo "run_deploy=true" >> $GITHUB_OUTPUT
+              echo "run_release=false" >> $GITHUB_OUTPUT
+              echo "run_build_push=true" >> $GITHUB_OUTPUT
+              echo "run_build_check=false" >> $GITHUB_OUTPUT
+              echo "extra_tag=latest-qa" >> $GITHUB_OUTPUT
+              echo "pre_release_branches=release/next,deploy/staging" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=staging.qa" >> $GITHUB_OUTPUT
+              ;;
+            preproduction)
+              echo "run_tests=true" >> $GITHUB_OUTPUT
+              echo "run_deploy=true" >> $GITHUB_OUTPUT
+              echo "run_release=false" >> $GITHUB_OUTPUT
+              echo "run_build_push=true" >> $GITHUB_OUTPUT
+              echo "run_build_check=false" >> $GITHUB_OUTPUT
+              echo "extra_tag=latest-rc" >> $GITHUB_OUTPUT
+              echo "pre_release_branches=rc-*,deploy/preproduction" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=staging.pp" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "run_tests=false" >> $GITHUB_OUTPUT
+              echo "run_deploy=true" >> $GITHUB_OUTPUT
+              echo "run_release=true" >> $GITHUB_OUTPUT
+              echo "run_build_push=true" >> $GITHUB_OUTPUT
+              echo "run_build_check=false" >> $GITHUB_OUTPUT
+              echo "extra_tag=latest" >> $GITHUB_OUTPUT
+              echo "pre_release_branches=" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Enrich images with environment build_config
+        id: enrich
+        shell: bash
+        env:
+          IMAGES_JSON: ${{ steps.parse.outputs.images_json }}
+          BUILD_CONFIG: ${{ steps.flags.outputs.build_config_overrides }}
+        run: |
+          if [ -n "$BUILD_CONFIG" ]; then
+            # Set build_config on images that don't already have the key defined
+            # Images with build_config: "" explicitly set will NOT be overridden
+            ENRICHED=$(echo "$IMAGES_JSON" | jq -c --arg bc "$BUILD_CONFIG" \
+              '[.[] | if has("build_config") then . else .build_config = $bc end]')
+          else
+            ENRICHED="$IMAGES_JSON"
+          fi
+          echo "images_json=$ENRICHED" >> $GITHUB_OUTPUT
+
+  # ─── Check if code changed (production only — skip changelog-only commits) ───
+  check:
     needs: config
+    if: needs.config.outputs.run_release == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Check for code changes
+        id: check
+        shell: bash
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          NON_META=$(echo "$CHANGED" | grep -vE '^CHANGELOG\.md$|^\.ai/' | grep -v "^$" || true)
+          if [ -z "$NON_META" ]; then
+            echo "Only metadata changed — skipping release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "Code changes detected — proceeding"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+  # ─── Go unit tests ───
+  go-test:
+    needs: config
+    if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_go_test == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: ${{ fromJson(needs.config.outputs.go_test_json).dirs }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ fromJson(needs.config.outputs.go_test_json).version }}
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
+
+      - name: Run unit tests (${{ matrix.dir }})
+        run: cd ${{ matrix.dir }} && go test ./... -timeout ${{ fromJson(needs.config.outputs.go_test_json).timeout || '120s' }}
+
+  # ─── Node tests ───
+  node-test:
+    needs: config
+    if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_node_test == 'true'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Service=${{ needs.config.outputs.service_name }} Env=${{ inputs.environment }}"
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ fromJson(needs.config.outputs.node_test_json).node_version || '24' }}
+          cache: npm
+          cache-dependency-path: ${{ fromJson(needs.config.outputs.node_test_json).dir }}/package-lock.json
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}
+        run: cd ${{ fromJson(needs.config.outputs.node_test_json).dir }} && npm ci
+
+      - name: Run tests
+        run: |
+          DIR="${{ fromJson(needs.config.outputs.node_test_json).dir }}"
+          CMD="${{ fromJson(needs.config.outputs.node_test_json).command }}"
+          if [ -n "$CMD" ]; then
+            cd "$DIR" && eval "$CMD"
+          else
+            cd "$DIR" && npm test -- --watch=false --browsers=ChromeHeadless
+          fi
+
+  # ─── E2E tests ───
+  e2e:
+    needs: config
+    if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_e2e == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: E2E setup
+        if: fromJson(needs.config.outputs.e2e_json).setup != null
+        env:
+          KEYCLOAK_CLIENT_SECRET: ${{ secrets.KEYCLOAK_CLIENT_SECRET }}
+        run: ${{ fromJson(needs.config.outputs.e2e_json).setup }}
+
+      - name: Run E2E tests
+        env:
+          KEYCLOAK_CLIENT_SECRET: ${{ secrets.KEYCLOAK_CLIENT_SECRET }}
+        run: ${{ fromJson(needs.config.outputs.e2e_json).command }}
+
+      - name: Show logs on failure
+        if: failure() && fromJson(needs.config.outputs.e2e_json).logs_command != null
+        run: ${{ fromJson(needs.config.outputs.e2e_json).logs_command }}
+
+      - name: E2E cleanup
+        if: always() && fromJson(needs.config.outputs.e2e_json).cleanup != null
+        run: ${{ fromJson(needs.config.outputs.e2e_json).cleanup }}
+
+  # ─── Extra checks (swagger, mocks, etc.) ───
+  extra-checks:
+    needs: config
+    if: needs.config.outputs.run_tests == 'true' && needs.config.outputs.has_extra_checks == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        check: ${{ fromJson(needs.config.outputs.extra_checks_json) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go (for extra checks)
+        uses: actions/setup-go@v6
+        if: needs.config.outputs.has_go_test == 'true'
+        with:
+          go-version: ${{ fromJson(needs.config.outputs.go_test_json).version }}
+          cache-dependency-path: ${{ fromJson(needs.config.outputs.go_test_json).dirs[0] }}/go.sum
+
+      - name: Setup (${{ matrix.check.name }})
+        if: matrix.check.setup != null
+        run: ${{ matrix.check.setup }}
+
+      - name: Run ${{ matrix.check.name }}
+        run: |
+          if ! eval '${{ matrix.check.command }}'; then
+            echo "::error::${{ matrix.check.error || 'Check failed' }}"
+            exit 1
+          fi
+
+  # ─── Version resolution ───
+  version:
+    permissions:
+      contents: write
+    needs: [config, check]
+    if: |
+      always() &&
+      needs.config.result == 'success' &&
+      (needs.config.outputs.run_build_push == 'true') &&
+      (needs.check.result == 'skipped' || needs.check.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        uses: qqcw/gh-actions/actions/version-resolve@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          version_override: ${{ inputs.version_override }}
+          pre_release_branches: ${{ needs.config.outputs.pre_release_branches }}
+
+  # ─── Build and push Docker images ───
+  build:
+    needs: [config, version, go-test, node-test, e2e, extra-checks]
+    if: |
+      always() &&
+      needs.config.result == 'success' &&
+      needs.version.result == 'success' &&
+      (needs.go-test.result == 'success' || needs.go-test.result == 'skipped') &&
+      (needs.node-test.result == 'success' || needs.node-test.result == 'skipped') &&
+      (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') &&
+      (needs.extra-checks.result == 'success' || needs.extra-checks.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and push
+        uses: qqcw/gh-actions/actions/docker-build-push@main
+        with:
+          images_json: ${{ needs.config.outputs.images_json }}
+          version: ${{ needs.version.outputs.version }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
+          docker_password: ${{ secrets.DOCKER_PASSWORD }}
+          extra_tag: ${{ needs.config.outputs.extra_tag }}
+          push: "true"
+          gh_package_token: ${{ secrets.GH_PACKAGE_TOKEN }}
+
+  # ─── Build check only (PR — no push) ───
+  build-check:
+    needs: [config]
+    if: needs.config.outputs.run_build_check == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build check (no push)
+        uses: qqcw/gh-actions/actions/docker-build-push@main
+        with:
+          images_json: ${{ needs.config.outputs.images_json }}
+          version: pr-${{ github.event.number || github.sha }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
+          docker_password: ${{ secrets.DOCKER_PASSWORD }}
+          push: "false"
+          gh_package_token: ${{ secrets.GH_PACKAGE_TOKEN }}
+
+  # ─── Deploy to flux_apps ───
+  deploy:
+    permissions:
+      contents: write
+    needs: [config, version, build]
+    if: needs.config.outputs.run_deploy == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_urls_json: ${{ steps.deploy.outputs.deploy_urls_json }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate changelog
+        id: changelog
+        if: needs.config.outputs.run_release == 'true'
+        uses: qqcw/gh-actions/actions/changelog-generate@main
+        with:
+          previous_tag: ${{ needs.version.outputs.previous_tag }}
+          new_tag: ${{ needs.version.outputs.version }}
+
+      - name: Tag version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fetch_all_tags: true
+          tag_prefix: ""
+          custom_tag: ${{ needs.version.outputs.version }}
+          pre_release_branches: ${{ needs.config.outputs.pre_release_branches }}
+
+      - name: Deploy to environments
+        id: deploy
+        shell: bash
+        env:
+          DEPLOY_ENVS: ${{ needs.config.outputs.deploy_envs_json }}
+          SERVICE_NAME: ${{ needs.config.outputs.service_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.body }}
+          PR_TOKEN: ${{ secrets.PR_OPENER }}
+          IMAGES_JSON: ${{ needs.config.outputs.images_json }}
+        run: |
+          # Determine the primary deploy image (last image in the list, typically the BFF)
+          PRIMARY_IMAGE=$(echo "$IMAGES_JSON" | jq -r '.[-1].name')
+          DEPLOY_URLS="{}"
+          ENV_COUNT=$(echo "$DEPLOY_ENVS" | jq length)
+
+          for i in $(seq 0 $(($ENV_COUNT - 1))); do
+            ENV=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].env")
+            SVC=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].service_name // \"$SERVICE_NAME\"")
+            FILE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].file // \"\"")
+            AUTOMERGE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].automerge // true")
+
+            IMAGE="index.docker.io/${PRIMARY_IMAGE}:${VERSION}"
+
+            echo "::group::Deploying to ${ENV} (${SVC})"
+
+            # Checkout flux_apps fresh for each deployment
+            rm -rf _flux_deploy
+            git clone --depth 1 "https://x-access-token:${PR_TOKEN}@github.com/qqcw/flux_apps.git" _flux_deploy
+
+            if [ -n "$FILE" ]; then
+              VALUE_FILE="apps/${ENV}/${SVC}/${FILE}"
+            else
+              VALUE_FILE="apps/${ENV}/${SVC}/${SVC}_deployment.yaml"
+            fi
+
+            # Determine branch name
+            BRANCH="ci/${SVC}_${ENV}_deploy-${VERSION}"
+            if [ -n "$FILE" ]; then
+              FILE_SLUG=$(echo "$FILE" | sed 's/_deployment.yaml//' | sed 's/[^a-zA-Z0-9]/_/g')
+              BRANCH="ci/${SVC}_${ENV}_${FILE_SLUG}_deploy-${VERSION}"
+            fi
+
+            LABELS=""
+            if [ "$AUTOMERGE" = "true" ]; then
+              LABELS="automerge"
+            fi
+
+            cd _flux_deploy
+            git checkout -b "$BRANCH"
+
+            # Update the image in the deployment file
+            yq -i ".spec.template.spec.containers[0].image = \"${IMAGE}\"" "$VALUE_FILE"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$VALUE_FILE"
+
+            TITLE="ci: Release ${SVC} ${VERSION} - ${ENV}"
+            if [ -n "$FILE" ]; then
+              TITLE="ci: Release ${SVC} ${VERSION} - ${ENV} (${FILE})"
+            fi
+
+            git commit -m "$TITLE"
+            git push origin "$BRANCH"
+
+            PR_URL=$(GH_TOKEN="$PR_TOKEN" gh pr create \
+              --repo qqcw/flux_apps \
+              --title "$TITLE" \
+              --base main \
+              --head "$BRANCH" \
+              --body "$(printf '## %s %s\n\n%s' "$SVC" "$VERSION" "${CHANGELOG:-No changelog}")" \
+              ${LABELS:+--label "$LABELS"} \
+              2>&1 || echo "pending")
+
+            cd ..
+
+            # Build deploy URL key
+            URL_KEY="${ENV}"
+            if [ -n "$FILE" ]; then
+              URL_KEY="${ENV} (${FILE})"
+            fi
+            DEPLOY_URLS=$(echo "$DEPLOY_URLS" | jq --arg k "$URL_KEY" --arg v "$PR_URL" '. + {($k): $v}')
+
+            echo "::endgroup::"
+          done
+
+          rm -rf _flux_deploy
+
+          echo "deploy_urls_json=$(echo "$DEPLOY_URLS" | jq -c '.')" >> $GITHUB_OUTPUT
+
+  # ─── Release (production only) ───
+  release:
+    permissions:
+      contents: write
+      pull-requests: write
+    needs: [config, version, deploy]
+    if: needs.config.outputs.run_release == 'true' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        uses: qqcw/gh-actions/actions/changelog-generate@main
+        with:
+          previous_tag: ${{ needs.version.outputs.previous_tag }}
+          new_tag: ${{ needs.version.outputs.version }}
+
+      - name: Create changelog PR
+        uses: qqcw/gh-actions/actions/changelog-pr@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          changelog: ${{ steps.changelog.outputs.body }}
+          project_name: ${{ needs.config.outputs.release_name }}
+          pr_token: ${{ secrets.PR_OPENER }}
+
+      - name: Create GitHub Release
+        uses: qqcw/gh-actions/actions/github-release@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          name: "${{ needs.config.outputs.release_name }} ${{ needs.version.outputs.version }}"
+          changelog: ${{ steps.changelog.outputs.body }}
+          deployment_urls_json: ${{ needs.deploy.outputs.deploy_urls_json }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
