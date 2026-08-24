@@ -30,10 +30,6 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   # ─── Load config from .github/pipeline.yml in the caller repo ───
   config:
@@ -358,6 +354,8 @@ jobs:
 
   # ─── Version resolution ───
   version:
+    permissions:
+      contents: write
     needs: [config, check]
     if: |
       always() &&
@@ -427,6 +425,8 @@ jobs:
 
   # ─── Deploy to flux_apps ───
   deploy:
+    permissions:
+      contents: write
     needs: [config, version, build]
     if: needs.config.outputs.run_deploy == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
@@ -545,6 +545,9 @@ jobs:
 
   # ─── Release (production only) ───
   release:
+    permissions:
+      contents: write
+      pull-requests: write
     needs: [config, version, deploy]
     if: needs.config.outputs.run_release == 'true' && needs.deploy.result == 'success'
     runs-on: ubuntu-latest
