@@ -424,7 +424,10 @@ jobs:
   # ─── Deploy to flux_apps ───
   deploy:
     needs: [config, version, build]
-    if: needs.config.outputs.run_deploy == 'true' && needs.build.result == 'success'
+    if: |
+      always() &&
+      needs.config.outputs.run_deploy == 'true' &&
+      needs.build.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       deploy_urls_json: ${{ steps.deploy.outputs.deploy_urls_json }}
@@ -542,7 +545,10 @@ jobs:
   # ─── Release (production only) ───
   release:
     needs: [config, version, deploy]
-    if: needs.config.outputs.run_release == 'true' && needs.deploy.result == 'success'
+    if: |
+      always() &&
+      needs.config.outputs.run_release == 'true' &&
+      needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
