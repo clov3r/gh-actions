@@ -11,10 +11,6 @@ on:
         description: "Force a specific version (production only)"
         type: string
         default: ""
-    outputs:
-      version:
-        description: "Resolved version tag"
-        value: ${{ jobs.version.outputs.version }}
     secrets:
       DOCKER_USERNAME:
         required: false
