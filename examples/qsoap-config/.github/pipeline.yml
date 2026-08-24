@@ -1,0 +1,12 @@
+service_name: qsoap-config
+release_name: QSoap Config
+
+images:
+  - name: quickquack/qsoap-config
+
+tests:
+  go:
+    version: "1.25"
+    dirs: [server]
+  node:
+    dir: client

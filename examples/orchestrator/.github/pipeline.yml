@@ -1,0 +1,38 @@
+service_name: orchestrator-bff
+release_name: Orchestrator
+
+images:
+  - name: quickquack/orchestrator
+    context: ./orchestrator
+    dockerfile: Dockerfile
+  - name: quickquack/orchestrator-bff
+    context: .
+    dockerfile: bff/Dockerfile
+
+tests:
+  go:
+    version: "1.26"
+    dirs: [orchestrator, bff]
+  node:
+    dir: device-management-ui
+    command: npm run build -- --configuration production
+  e2e:
+    setup: |
+      docker buildx bake \
+        --set "*.args.BUILD_VERSION=test-${{ github.sha }}" \
+        --set "*.args.BUILD_GITHASH=${{ github.sha }}" \
+        --load e2e
+    command: |
+      export COMPOSE_BAKE=true
+      ./run ci
+
+# Override default deploy targets for production (3 targets instead of 2)
+deploy_environments:
+  production:
+    - env: preproduction
+    - env: prod
+      file: orchestrator-bff_beta_deployment.yaml
+      automerge: true
+    - env: prod
+      file: orchestrator-bff_v1_deployment.yaml
+      automerge: false

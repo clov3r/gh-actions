@@ -1,0 +1,11 @@
+name: Build (dev branch)
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  pipeline:
+    uses: clov3r/gh-actions/.github/workflows/pipeline.yml@v1
+    with:
+      environment: dev
+    secrets: inherit

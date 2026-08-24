@@ -1,0 +1,17 @@
+name: Tag, Build and Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Force a specific version (e.g., 1.0.0). Leave empty for auto-increment."
+        required: false
+
+jobs:
+  pipeline:
+    uses: clov3r/gh-actions/.github/workflows/pipeline.yml@v1
+    with:
+      environment: production
+      version_override: ${{ inputs.version_override || '' }}
+    secrets: inherit

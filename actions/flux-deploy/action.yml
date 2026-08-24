@@ -1,0 +1,88 @@
+name: Flux Deploy
+description: Creates a deployment PR in flux_apps to update an image version.
+
+inputs:
+  environment:
+    description: "Target environment (dev, qa, preproduction, prod)"
+    required: true
+  service_name:
+    description: "Service name (e.g., qscm, orchestrator-bff)"
+    required: true
+  image:
+    description: "Full image reference (e.g., index.docker.io/quickquack/qscm:v1.2.3)"
+    required: true
+  version:
+    description: "Version tag for branch naming"
+    required: true
+  changelog:
+    description: "Changelog to include in PR description"
+    default: ""
+  deployment_file:
+    description: "Override deployment file path (default: apps/{env}/{service}/{service}_deployment.yaml)"
+    default: ""
+  automerge:
+    description: "Whether to add automerge label"
+    default: "true"
+  pr_token:
+    description: "Token for creating PRs in flux_apps"
+    required: true
+
+outputs:
+  pull_request_url:
+    description: "URL of the created deployment PR"
+    value: ${{ steps.deploy.outputs.pull_request_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout flux_apps
+      uses: actions/checkout@v6
+      with:
+        repository: qqcw/flux_apps
+        path: _flux_deploy
+        token: ${{ inputs.pr_token }}
+
+    - name: Resolve deployment file path
+      id: resolve
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.deployment_file }}" ]; then
+          FILE="apps/${{ inputs.environment }}/${{ inputs.service_name }}/${{ inputs.deployment_file }}"
+        else
+          FILE="apps/${{ inputs.environment }}/${{ inputs.service_name }}/${{ inputs.service_name }}_deployment.yaml"
+        fi
+        echo "file=$FILE" >> $GITHUB_OUTPUT
+
+    - name: Update deployment file
+      id: deploy
+      uses: fjogeleit/yaml-update-action@v0.17.0
+      with:
+        repository: qqcw/flux_apps
+        valueFile: ${{ steps.resolve.outputs.file }}
+        propertyPath: spec.template.spec.containers.0.image
+        value: ${{ inputs.image }}
+        branch: ci/${{ inputs.service_name }}_${{ inputs.environment }}_deploy-${{ inputs.version }}
+        targetBranch: main
+        createPR: true
+        message: "ci: Release ${{ inputs.service_name }} ${{ inputs.version }} - ${{ inputs.environment }}"
+        title: "ci: Release ${{ inputs.service_name }} ${{ inputs.version }} - ${{ inputs.environment }}"
+        description: |
+          ## ${{ inputs.service_name }} ${{ inputs.version }}
+
+          ${{ inputs.changelog }}
+        workDir: _flux_deploy
+        token: ${{ inputs.pr_token }}
+        masterBranchName: main
+        labels: ${{ inputs.automerge == 'true' && 'automerge' || '' }}
+
+    - name: Extract PR URL
+      shell: bash
+      run: |
+        PR_JSON='${{ steps.deploy.outputs.pull_request }}'
+        URL=$(echo "$PR_JSON" | jq -r '.html_url // empty' 2>/dev/null || echo "")
+        echo "pull_request_url=${URL:-pending}" >> $GITHUB_OUTPUT
+
+    - name: Clean up flux_apps checkout
+      if: always()
+      shell: bash
+      run: rm -rf _flux_deploy

@@ -1,0 +1,29 @@
+name: Go Test
+description: Runs Go unit tests with caching.
+
+inputs:
+  go_version:
+    description: "Go version"
+    default: "1.25"
+  working_directory:
+    description: "Directory containing go.mod"
+    default: "."
+  test_args:
+    description: "Test arguments"
+    default: "./..."
+  timeout:
+    description: "Test timeout"
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ inputs.go_version }}
+        cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+
+    - name: Run Go tests
+      shell: bash
+      run: cd ${{ inputs.working_directory }} && go test ${{ inputs.test_args }} -timeout ${{ inputs.timeout }}

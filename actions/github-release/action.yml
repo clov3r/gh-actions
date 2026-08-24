@@ -1,0 +1,59 @@
+name: GitHub Release
+description: Creates a GitHub Release with changelog and deployment links.
+
+inputs:
+  version:
+    description: "Tag name"
+    required: true
+  name:
+    description: "Release name (e.g., QSCM v1.2.3)"
+    required: true
+  changelog:
+    description: "Release body (markdown)"
+    default: ""
+  deployment_urls_json:
+    description: "JSON object of environment→PR URL mappings"
+    default: "{}"
+  github_token:
+    description: "GitHub token"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build release body
+      id: body
+      shell: bash
+      env:
+        CHANGELOG: ${{ inputs.changelog }}
+        DEPLOY_URLS: ${{ inputs.deployment_urls_json }}
+      run: |
+        {
+          if [ -n "$CHANGELOG" ]; then
+            printf '%s\n' "$CHANGELOG"
+          fi
+
+          # Add deployment links if any
+          URL_COUNT=$(echo "$DEPLOY_URLS" | jq 'length' 2>/dev/null || echo "0")
+          if [ "$URL_COUNT" -gt 0 ]; then
+            printf '\n---\n### Deployment\n'
+            echo "$DEPLOY_URLS" | jq -r 'to_entries[] | "- **\(.key)**: \(.value)"'
+          fi
+        } > /tmp/release_body.md
+
+        {
+          echo "body<<RELEASE_BODY_EOF"
+          cat /tmp/release_body.md
+          echo "RELEASE_BODY_EOF"
+        } >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: ${{ inputs.version }}
+        name: ${{ inputs.name }}
+        body: ${{ steps.body.outputs.body }}
+        generate_release_notes: ${{ steps.body.outputs.body == '' }}
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}

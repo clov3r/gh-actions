@@ -1,0 +1,13 @@
+name: Pull Request Tests
+on:
+  pull_request:
+    branches: [main, release/next]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  pipeline:
+    if: github.event.pull_request.draft == false || contains(github.event.pull_request.labels.*.name, 'test-draft')
+    uses: clov3r/gh-actions/.github/workflows/pipeline.yml@v1
+    with:
+      environment: pr
+    secrets: inherit

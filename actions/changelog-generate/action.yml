@@ -1,0 +1,64 @@
+name: Changelog Generate
+description: Generates a conventional-commit changelog between two tags.
+
+inputs:
+  previous_tag:
+    description: "Start of range"
+    required: true
+  new_tag:
+    description: "End of range (version tag)"
+    required: true
+
+outputs:
+  body:
+    description: "Markdown changelog body"
+    value: ${{ steps.changelog.outputs.body }}
+
+runs:
+  using: composite
+  steps:
+    - name: Generate Changelog
+      id: changelog
+      shell: bash
+      run: |
+        PREV_TAG="${{ inputs.previous_tag }}"
+        NEW_TAG="${{ inputs.new_tag }}"
+
+        # Fall back to latest stable tag if empty or v0.0.0
+        if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "v0.0.0" ]; then
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          echo "Resolved previous tag via git: $PREV_TAG"
+        fi
+
+        if [ -z "$PREV_TAG" ]; then
+          echo "No previous tag found — generating changelog from all commits"
+          RANGE="HEAD"
+        else
+          echo "Generating changelog: $PREV_TAG..$NEW_TAG (HEAD)"
+          RANGE="$PREV_TAG..HEAD"
+        fi
+
+        {
+          printf '### [%s](https://github.com/%s/compare/%s...%s) (%s)\n' \
+            "${NEW_TAG#v}" "$GITHUB_REPOSITORY" "${PREV_TAG:-initial}" "$NEW_TAG" "$(date +%Y-%m-%d)"
+
+          for TYPE_LABEL in "Bug Fixes:fix" "Features:feat" "Performance:perf" "CI:ci" "Tests:test" "Refactoring:refactor"; do
+            LABEL="${TYPE_LABEL%%:*}"
+            PREFIX="${TYPE_LABEL##*:}"
+            ENTRIES=$(git log "$RANGE" --no-merges --format="%s (%h)" \
+              | grep -iE "^${PREFIX}(\(|:)" \
+              | sed -E "s/^${PREFIX}\(([^)]+)\): (.*)/* **\1:** \2/" \
+              | sed -E "s/^${PREFIX}: (.*)/* \1/" \
+              || true)
+            if [ -n "$ENTRIES" ]; then
+              printf '\n\n### %s\n\n%s' "$LABEL" "$ENTRIES"
+            fi
+          done
+          printf '\n'
+        } > /tmp/changelog.md
+
+        {
+          echo "body<<CHANGELOG_EOF"
+          cat /tmp/changelog.md
+          echo "CHANGELOG_EOF"
+        } >> $GITHUB_OUTPUT

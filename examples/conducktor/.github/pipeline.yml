@@ -1,0 +1,27 @@
+service_name: conducktor-bff
+release_name: Conducktor
+
+images:
+  - name: quickquack/conducktor-bff
+    context: .
+    dockerfile: bff/Dockerfile
+  - name: quickquack/conducktor
+    context: ./client
+    dockerfile: Dockerfile
+
+tests:
+  go:
+    version: "1.26"
+    dirs: [bff, client]
+    timeout: 120s
+
+# 3-target production deploy (preprod, beta, stable)
+deploy_environments:
+  production:
+    - env: preproduction
+    - env: prod
+      file: conducktor-bff_beta_deployment.yaml
+      automerge: true
+    - env: prod
+      file: conducktor-bff_v1_deployment.yaml
+      automerge: false

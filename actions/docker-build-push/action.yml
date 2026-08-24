@@ -1,0 +1,108 @@
+name: Docker Build and Push
+description: Builds and pushes Docker image(s) to Docker Hub.
+
+inputs:
+  images_json:
+    description: "JSON array of image configs: [{name, context, dockerfile, build_config}]"
+    required: true
+  version:
+    description: "Version tag (e.g., v1.2.3)"
+    required: true
+  docker_username:
+    description: "Docker Hub username"
+    required: true
+  docker_password:
+    description: "Docker Hub password"
+    required: true
+  extra_tag:
+    description: "Additional tag suffix (e.g., latest, latest-qa)"
+    default: "latest"
+  extra_build_args:
+    description: "Additional build-args (newline-separated KEY=VALUE)"
+    default: ""
+  push:
+    description: "Whether to push images (false for PR build checks)"
+    default: "true"
+  gh_package_token:
+    description: "Token for @qqcw npm packages during Docker builds"
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Login to Docker Hub
+      if: inputs.push == 'true'
+      uses: docker/login-action@v4
+      with:
+        username: ${{ inputs.docker_username }}
+        password: ${{ inputs.docker_password }}
+
+    - name: Build and push images
+      shell: bash
+      env:
+        IMAGES_JSON: ${{ inputs.images_json }}
+        VERSION: ${{ inputs.version }}
+        EXTRA_TAG: ${{ inputs.extra_tag }}
+        EXTRA_BUILD_ARGS: ${{ inputs.extra_build_args }}
+        PUSH: ${{ inputs.push }}
+        GH_PACKAGE_TOKEN: ${{ inputs.gh_package_token }}
+        GIT_SHA: ${{ github.sha }}
+        GIT_REF: ${{ github.ref_name }}
+        GIT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+      run: |
+        IMAGE_COUNT=$(echo "$IMAGES_JSON" | jq length)
+
+        for i in $(seq 0 $(($IMAGE_COUNT - 1))); do
+          NAME=$(echo "$IMAGES_JSON" | jq -r ".[$i].name")
+          CONTEXT=$(echo "$IMAGES_JSON" | jq -r ".[$i].context // \".\"")
+          DOCKERFILE=$(echo "$IMAGES_JSON" | jq -r ".[$i].dockerfile // \"Dockerfile\"")
+          BUILD_CONFIG=$(echo "$IMAGES_JSON" | jq -r ".[$i].build_config // \"\"")
+
+          echo "::group::Building $NAME"
+
+          TAGS="--tag ${NAME}:${VERSION}"
+          if [ -n "$EXTRA_TAG" ]; then
+            TAGS="$TAGS --tag ${NAME}:${EXTRA_TAG}"
+          fi
+
+          BUILD_ARGS="--build-arg BUILD_VERSION=${VERSION}"
+          BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_GITHASH=${GIT_SHA}"
+          BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_TIME=${GIT_TIMESTAMP}"
+          BUILD_ARGS="$BUILD_ARGS --build-arg BRANCH=${GIT_REF}"
+
+          if [ -n "$BUILD_CONFIG" ]; then
+            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_CONFIG=${BUILD_CONFIG}"
+          fi
+
+          if [ -n "$GH_PACKAGE_TOKEN" ]; then
+            BUILD_ARGS="$BUILD_ARGS --build-arg GH_PACKAGE_TOKEN=${GH_PACKAGE_TOKEN}"
+          fi
+
+          # Append any extra build args
+          if [ -n "$EXTRA_BUILD_ARGS" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $line"
+            done <<< "$EXTRA_BUILD_ARGS"
+          fi
+
+          PUSH_FLAG=""
+          if [ "$PUSH" = "true" ]; then
+            PUSH_FLAG="--push"
+          else
+            PUSH_FLAG="--load"
+          fi
+
+          docker buildx build \
+            --file "${CONTEXT}/${DOCKERFILE}" \
+            $TAGS \
+            $BUILD_ARGS \
+            $PUSH_FLAG \
+            --cache-from type=gha,scope=${NAME##*/} \
+            --cache-to type=gha,mode=max,scope=${NAME##*/} \
+            "$CONTEXT"
+
+          echo "::endgroup::"
+        done

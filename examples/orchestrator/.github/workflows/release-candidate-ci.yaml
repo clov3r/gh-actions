@@ -1,0 +1,11 @@
+name: Build (Release Candidate)
+on:
+  push:
+    branches: [rc-*, deploy/preproduction]
+
+jobs:
+  pipeline:
+    uses: clov3r/gh-actions/.github/workflows/pipeline.yml@v1
+    with:
+      environment: preproduction
+    secrets: inherit

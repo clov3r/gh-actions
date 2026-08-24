@@ -1,0 +1,11 @@
+name: Build (QA branch)
+on:
+  push:
+    branches: [release/next, deploy/staging]
+
+jobs:
+  pipeline:
+    uses: clov3r/gh-actions/.github/workflows/pipeline.yml@v1
+    with:
+      environment: qa
+    secrets: inherit

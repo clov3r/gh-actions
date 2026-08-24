@@ -1,0 +1,33 @@
+service_name: qscm
+release_name: QSCM
+
+images:
+  - name: quickquack/qscm
+
+tests:
+  go:
+    version: "1.25"
+    dirs: [server]
+  e2e:
+    command: |
+      export GIT_VERSION=test-${{ github.sha }}
+      export BRANCH=${{ github.head_ref || github.ref_name }}
+      export SLOW_TESTS=false
+      COMPOSE_PROJECT_NAME=qscm-test docker compose -f docker-compose.test.yml \
+        --profile test up --build --abort-on-container-exit test-runner
+    cleanup: COMPOSE_PROJECT_NAME=qscm-test docker compose -f docker-compose.test.yml down -v || true
+    logs_command: COMPOSE_PROJECT_NAME=qscm-test docker compose -f docker-compose.test.yml logs qscm-test 2>&1 || true
+  extra:
+    - name: Check stale Swagger docs
+      setup: go install github.com/swaggo/swag/cmd/swag@latest
+      command: cd server && $(go env GOPATH)/bin/swag init && cd .. && git diff --quiet --exit-code server/docs
+      error: "Swagger definitions are out of date. Run 'cd server && swag init'"
+    - name: Check stale mocks
+      setup: go install go.uber.org/mock/mockgen@latest
+      command: |
+        cd server
+        $(go env GOPATH)/bin/mockgen -source=dao/IQonfigDao.go -destination=dao/mocks/mock_dao.go -package=mocks
+        $(go env GOPATH)/bin/mockgen -source=adapters/json_validator/validator.go -destination=adapters/json_validator/mocks/mock_validator.go -package=mocks
+        cd ..
+        git diff --quiet --exit-code server/dao/mocks server/adapters/json_validator/mocks
+      error: "Mock definitions are out of date. Run './run mocks'"

@@ -1,0 +1,29 @@
+name: Check Code Change
+description: Determines if a release should proceed by checking if the commit only changed metadata files.
+
+inputs:
+  ignore_patterns:
+    description: "Grep -E pattern for files to ignore (e.g., '^CHANGELOG.md$|^\\.ai/')"
+    default: '^CHANGELOG\.md$|^\.ai/'
+
+outputs:
+  should_release:
+    description: "'true' if code files changed, 'false' if only metadata"
+    value: ${{ steps.check.outputs.should_release }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check if this is a code change
+      id: check
+      shell: bash
+      run: |
+        CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+        NON_META=$(echo "$CHANGED" | grep -vE '${{ inputs.ignore_patterns }}' | grep -v "^$" || true)
+        if [ -z "$NON_META" ]; then
+          echo "Only metadata changed — skipping release"
+          echo "should_release=false" >> $GITHUB_OUTPUT
+        else
+          echo "Code changes detected — proceeding"
+          echo "should_release=true" >> $GITHUB_OUTPUT
+        fi
