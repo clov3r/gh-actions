@@ -462,8 +462,9 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_OPENER }}
           IMAGES_JSON: ${{ needs.config.outputs.images_json }}
         run: |
-          # Determine the primary deploy image (last image in the list, typically the BFF)
-          PRIMARY_IMAGE=$(echo "$IMAGES_JSON" | jq -r '.[-1].name')
+          # Determine the primary deploy image: match service_name, or fall back to last image
+          PRIMARY_IMAGE=$(echo "$IMAGES_JSON" | jq -r --arg svc "$SERVICE_NAME" \
+            '(.[] | select(.name | endswith($svc))).name // .[-1].name')
           DEPLOY_URLS="{}"
           ENV_COUNT=$(echo "$DEPLOY_ENVS" | jq length)
 
