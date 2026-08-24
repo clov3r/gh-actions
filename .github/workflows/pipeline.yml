@@ -37,7 +37,7 @@ jobs:
     outputs:
       service_name: ${{ steps.parse.outputs.service_name }}
       release_name: ${{ steps.parse.outputs.release_name }}
-      images_json: ${{ steps.parse.outputs.images_json }}
+      images_json: ${{ steps.enrich.outputs.images_json || steps.parse.outputs.images_json }}
       go_test_json: ${{ steps.parse.outputs.go_test_json }}
       node_test_json: ${{ steps.parse.outputs.node_test_json }}
       e2e_json: ${{ steps.parse.outputs.e2e_json }}
@@ -78,8 +78,9 @@ jobs:
           echo "service_name=$(yq -r '.service_name' $CONFIG)" >> $GITHUB_OUTPUT
           echo "release_name=$(yq -r '.release_name // .service_name' $CONFIG)" >> $GITHUB_OUTPUT
 
-          # Images
-          echo "images_json=$(yq -o=json '.images' $CONFIG | jq -c '.')" >> $GITHUB_OUTPUT
+          # Images — inject environment build_config into images that don't specify their own
+          IMAGES_RAW=$(yq -o=json '.images' $CONFIG | jq -c '.')
+          echo "images_json=$IMAGES_RAW" >> $GITHUB_OUTPUT
 
           # Tests
           GO_TEST=$(yq -o=json '.tests.go // null' $CONFIG | jq -c '.')
@@ -193,6 +194,23 @@ jobs:
               ;;
           esac
 
+      - name: Enrich images with environment build_config
+        id: enrich
+        shell: bash
+        env:
+          IMAGES_JSON: ${{ steps.parse.outputs.images_json }}
+          BUILD_CONFIG: ${{ steps.flags.outputs.build_config_overrides }}
+        run: |
+          if [ -n "$BUILD_CONFIG" ]; then
+            # Set build_config on images that don't already have the key defined
+            # Images with build_config: "" explicitly set will NOT be overridden
+            ENRICHED=$(echo "$IMAGES_JSON" | jq -c --arg bc "$BUILD_CONFIG" \
+              '[.[] | if has("build_config") then . else .build_config = $bc end]')
+          else
+            ENRICHED="$IMAGES_JSON"
+          fi
+          echo "images_json=$ENRICHED" >> $GITHUB_OUTPUT
+
   # ─── Check if code changed (production only — skip changelog-only commits) ───
   check:
     needs: config
@@ -205,8 +223,19 @@ jobs:
         with:
           fetch-depth: 2
 
-      - uses: ./actions/check-code-change
+      - name: Check for code changes
         id: check
+        shell: bash
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          NON_META=$(echo "$CHANGED" | grep -vE '^CHANGELOG\.md$|^\.ai/' | grep -v "^$" || true)
+          if [ -z "$NON_META" ]; then
+            echo "Only metadata changed — skipping release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "Code changes detected — proceeding"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
 
   # ─── Go unit tests ───
   go-test:
@@ -372,7 +401,6 @@ jobs:
           docker_username: ${{ secrets.DOCKER_USERNAME }}
           docker_password: ${{ secrets.DOCKER_PASSWORD }}
           extra_tag: ${{ needs.config.outputs.extra_tag }}
-          extra_build_args: ${{ needs.config.outputs.build_config_overrides != '' && format('BUILD_CONFIG={0}', needs.config.outputs.build_config_overrides) || '' }}
           push: "true"
           gh_package_token: ${{ secrets.GH_PACKAGE_TOKEN }}
 
