@@ -508,6 +508,7 @@ jobs:
             ENV=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].env")
             SVC=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].service_name // \"$SERVICE_NAME\"")
             FILE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].file // \"\"")
+            LABEL=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].label // \"\"")
             AUTOMERGE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].automerge // true")
 
             IMAGE="index.docker.io/${PRIMARY_IMAGE}:${VERSION}"
@@ -546,9 +547,13 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add "$VALUE_FILE"
 
-            TITLE="ci: Release ${SVC} ${VERSION} - ${ENV}"
-            if [ -n "$FILE" ]; then
-              TITLE="ci: Release ${SVC} ${VERSION} - ${ENV} (${FILE})"
+            # Use label if provided, otherwise derive from env
+            if [ -n "$LABEL" ]; then
+              TITLE="ci: Release ${SVC} ${VERSION} - ${LABEL}"
+            else
+              # Capitalize env for display
+              ENV_DISPLAY=$(echo "$ENV" | sed 's/^./\U&/')
+              TITLE="ci: Release ${SVC} ${VERSION} - ${ENV_DISPLAY}"
             fi
 
             git commit -m "$TITLE"
