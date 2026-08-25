@@ -309,11 +309,20 @@ jobs:
         if: fromJson(needs.config.outputs.e2e_json).setup != null
         env:
           KEYCLOAK_CLIENT_SECRET: ${{ secrets.KEYCLOAK_CLIENT_SECRET }}
+          PIPELINE_SHA: ${{ github.sha }}
+          PIPELINE_REF: ${{ github.ref_name }}
+          PIPELINE_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          PIPELINE_PR_NUMBER: ${{ github.event.number || '' }}
+          PIPELINE_VERSION: ${{ needs.config.outputs.service_name }}
         run: ${{ fromJson(needs.config.outputs.e2e_json).setup }}
 
       - name: Run E2E tests
         env:
           KEYCLOAK_CLIENT_SECRET: ${{ secrets.KEYCLOAK_CLIENT_SECRET }}
+          PIPELINE_SHA: ${{ github.sha }}
+          PIPELINE_REF: ${{ github.ref_name }}
+          PIPELINE_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          PIPELINE_PR_NUMBER: ${{ github.event.number || '' }}
         run: ${{ fromJson(needs.config.outputs.e2e_json).command }}
 
       - name: Show logs on failure
