@@ -447,7 +447,6 @@ jobs:
 
       - name: Generate changelog
         id: changelog
-        if: needs.config.outputs.run_release == 'true'
         uses: qqcw/gh-actions/actions/changelog-generate@main
         with:
           previous_tag: ${{ needs.version.outputs.previous_tag }}
