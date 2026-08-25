@@ -278,12 +278,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ fromJson(needs.config.outputs.node_test_json).node_version || '24' }}
+          registry-url: https://npm.pkg.github.com
           cache: npm
           cache-dependency-path: ${{ fromJson(needs.config.outputs.node_test_json).dir }}/package-lock.json
 
       - name: Install dependencies
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}
+          GH_PACKAGE_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}
         run: cd ${{ fromJson(needs.config.outputs.node_test_json).dir }} && npm ci
 
       - name: Run tests
