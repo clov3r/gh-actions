@@ -509,6 +509,7 @@ jobs:
             SVC=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].service_name // \"$SERVICE_NAME\"")
             FILE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].file // \"\"")
             LABEL=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].label // \"\"")
+            EXTRA_DESC=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].description // \"\"")
             AUTOMERGE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].automerge // true")
 
             IMAGE="index.docker.io/${PRIMARY_IMAGE}:${VERSION}"
@@ -564,7 +565,14 @@ jobs:
               --title "$TITLE" \
               --base main \
               --head "$BRANCH" \
-              --body "$(printf '## %s %s\n\n%s' "$SVC" "$VERSION" "${CHANGELOG:-No changelog}")" \
+              --body "$(
+                HEADING="## ${SVC} ${VERSION}"
+                [ -n "$LABEL" ] && HEADING="${HEADING} (${LABEL})"
+                BODY="${HEADING}"
+                [ -n "$EXTRA_DESC" ] && BODY="${BODY}\n\n${EXTRA_DESC}"
+                BODY="${BODY}\n\n${CHANGELOG:-No changelog}"
+                printf '%b' "$BODY"
+              )" \
               ${LABELS:+--label "$LABELS"} \
               2>&1 || echo "pending")
 
