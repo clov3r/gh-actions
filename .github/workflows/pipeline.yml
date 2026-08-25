@@ -466,6 +466,8 @@ jobs:
       deploy_urls_json: ${{ steps.deploy.outputs.deploy_urls_json }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Generate changelog
         id: changelog
