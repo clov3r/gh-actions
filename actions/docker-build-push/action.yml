@@ -69,6 +69,7 @@ runs:
           fi
 
           BUILD_ARGS="--build-arg BUILD_VERSION=${VERSION}"
+          BUILD_ARGS="$BUILD_ARGS --build-arg VERSION=${VERSION}"
           BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_GITHASH=${GIT_SHA}"
           BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_TIME=${GIT_TIMESTAMP}"
           BUILD_ARGS="$BUILD_ARGS --build-arg BRANCH=${GIT_REF}"
