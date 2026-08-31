@@ -1,0 +1,31 @@
+name: Gate main
+
+on:
+  workflow_call:
+    secrets:
+      PR_OPENER:
+        required: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Auto-approve release PR
+        if: startsWith(github.head_ref, 'release/')
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.PR_OPENER }}
+
+      - name: Close non-release PR
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        uses: actions/checkout@v6
+
+      - name: Comment and close
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        run: |
+          gh pr close ${{ github.event.number }} -c "Please open a PR against release/next, not main directly."
+        env:
+          GH_TOKEN: ${{ github.token }}

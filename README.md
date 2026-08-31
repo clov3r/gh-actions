@@ -438,6 +438,76 @@ Skipped jobs (e.g., `deploy`, `release`, `version`) should NOT be required — t
 10. Set up required status checks in branch protection
 11. Verify ECR builds still fire (tag-triggered repos need PAT for tagging)
 
+## Branch Sync Workflow
+
+Keeps downstream branches (e.g. `release/next`, `dev`) in sync with `main` after each push. It replays all commits unique to the branch on top of the latest `main` — merge commits are cherry-picked with `-m 1` to preserve PR diffs, regular commits are cherry-picked directly. If any replay fails (conflict), the job aborts with no changes pushed.
+
+### Caller Workflow (`.github/workflows/sync-branches.yaml`)
+
+```yaml
+name: Sync branches
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    uses: qqcw/gh-actions/.github/workflows/sync-branches.yml@v1
+    with:
+      branches: '["release/next", "dev"]'
+    secrets:
+      PR_OPENER: ${{ secrets.PR_OPENER }}
+```
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `branches` | JSON string array | `["release/next", "dev"]` | Branches to replay onto main |
+
+### Behavior
+
+1. Finds all commits on the branch not reachable from `main` (`git rev-list --reverse main..branch`)
+2. Creates a new branch from `main`
+3. Replays each commit in order: cherry-pick for regular commits, cherry-pick `-m 1` for merge commits
+4. Force-pushes the result (with `--force-with-lease`)
+
+- Each branch is synced independently (parallel, `fail-fast: false`)
+- If a branch doesn't exist, it's skipped with a warning
+- If a branch already contains all of `main`, it's a no-op
+- If any cherry-pick fails (conflict), it aborts immediately — **no changes are pushed**
+
+### Branch Protection
+
+The target branches (`release/next`, `dev`) must **not** have the `non_fast_forward` rule, since this workflow force-pushes. The `pull_request` rule alone is sufficient to prevent humans from pushing directly — force-push is only used by this CI automation via `PR_OPENER`.
+
+## Gate Main Workflow
+
+Auto-approves PRs from `release/*` branches into `main` (so they can merge without manual approval). Closes PRs from any other branch with a comment directing them to `release/next`.
+
+### Caller Workflow (`.github/workflows/gate-main.yaml`)
+
+```yaml
+name: Gate main
+on:
+  pull_request:
+    branches: [main]
+    types: [opened]
+
+jobs:
+  gate:
+    uses: qqcw/gh-actions/.github/workflows/gate-main.yml@v1
+    secrets:
+      PR_OPENER: ${{ secrets.PR_OPENER }}
+```
+
+### How It Works
+
+- PR from `release/next` → `main`: auto-approved by `qqcw-ite` via `PR_OPENER`
+- PR from any other branch → `main`: closed with a comment
+
+This pairs with requiring >=1 approval on `main` — release PRs get the bot approval automatically, while direct PRs are rejected.
+
 ## Versioning
 
 - Pin to major version: `@v1`
