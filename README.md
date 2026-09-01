@@ -485,10 +485,13 @@ The target branches (`release/next`, `dev`) must **not** have the `non_fast_forw
 
 Auto-approves PRs from `release/*` branches into `main` (so they can merge without manual approval). Closes PRs from any other branch with a comment directing them to `release/next`.
 
-### Caller Workflow (`.github/workflows/gate-main.yaml`)
+**Note:** This cannot be a reusable `workflow_call` workflow — `pull_request` events don't grant sufficient permissions for reusable workflows with `pull-requests: write`. It must be an inline workflow in each repo.
+
+### Inline Workflow (`.github/workflows/gate-main.yaml`)
 
 ```yaml
 name: Gate main
+
 on:
   pull_request:
     branches: [main]
@@ -496,14 +499,32 @@ on:
 
 jobs:
   gate:
-    uses: qqcw/gh-actions/.github/workflows/gate-main.yml@v1
-    secrets:
-      PR_OPENER: ${{ secrets.PR_OPENER }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Auto-approve release PR
+        if: startsWith(github.head_ref, 'release/')
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.PR_OPENER }}
+
+      - name: Checkout
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        uses: actions/checkout@v6
+
+      - name: Close non-release PR
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        run: |
+          gh pr close ${{ github.event.number }} -c "Please open a PR against release/next, not main directly."
+        env:
+          GH_TOKEN: ${{ github.token }}
 ```
 
 ### How It Works
 
-- PR from `release/next` → `main`: auto-approved by `qqcw-ite` via `PR_OPENER`
+- PR from `release/*` → `main`: auto-approved by `qqcw-ite` via `PR_OPENER`
 - PR from any other branch → `main`: closed with a comment
 
 This pairs with requiring >=1 approval on `main` — release PRs get the bot approval automatically, while direct PRs are rejected.
