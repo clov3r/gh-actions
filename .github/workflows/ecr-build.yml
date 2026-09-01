@@ -1,0 +1,164 @@
+name: ECR Build
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Pipeline environment: dev, qa, preproduction, production. If empty, derived from tag suffix."
+        type: string
+        default: ""
+      tag:
+        description: "Image tag (defaults to github.ref_name)"
+        type: string
+        default: ""
+    secrets:
+      GH_PACKAGE_TOKEN:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      ecr_matrix: ${{ steps.merge.outputs.ecr_matrix }}
+      has_ecr: ${{ steps.merge.outputs.has_ecr }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      extra_tag: ${{ steps.resolve.outputs.extra_tag }}
+      build_config: ${{ steps.resolve.outputs.build_config }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve tag, environment, extra tag, and build config
+        id: resolve
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          # Resolve environment — explicit input takes priority, otherwise derive from tag
+          ENV="${{ inputs.environment }}"
+          if [ -z "$ENV" ]; then
+            if [[ "$TAG" == *-dev.* ]]; then
+              ENV="dev"
+            elif [[ "$TAG" == *-release-next.* ]] || [[ "$TAG" == *-deploy-staging.* ]]; then
+              ENV="qa"
+            elif [[ "$TAG" == *-rc-* ]] || [[ "$TAG" == *-deploy-preproduction.* ]]; then
+              ENV="preproduction"
+            elif [[ "$TAG" == *-* ]]; then
+              # Unknown prerelease suffix — default to dev
+              ENV="dev"
+            else
+              ENV="production"
+            fi
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+
+          case "$ENV" in
+            dev)
+              echo "extra_tag=latest-dev" >> $GITHUB_OUTPUT
+              echo "build_config=staging.dev" >> $GITHUB_OUTPUT
+              ;;
+            qa)
+              echo "extra_tag=latest-qa" >> $GITHUB_OUTPUT
+              echo "build_config=staging.qa" >> $GITHUB_OUTPUT
+              ;;
+            preproduction)
+              echo "extra_tag=latest-rc" >> $GITHUB_OUTPUT
+              echo "build_config=staging.pp" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "extra_tag=latest" >> $GITHUB_OUTPUT
+              echo "build_config=production" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "extra_tag=" >> $GITHUB_OUTPUT
+              echo "build_config=" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Parse and merge ECR config
+        id: merge
+        shell: bash
+        env:
+          BUILD_CONFIG: ${{ steps.resolve.outputs.build_config }}
+        run: |
+          CONFIG=".github/pipeline.yml"
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::Missing $CONFIG"
+            exit 1
+          fi
+
+          # Install yq
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          ECR_IMAGES=$(yq -o=json '.ecr.images // null' $CONFIG | jq -c '.')
+          if [ "$ECR_IMAGES" = "null" ]; then
+            echo "has_ecr=false" >> $GITHUB_OUTPUT
+            echo "ecr_matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          DOCKER_IMAGES=$(yq -o=json '.images // []' $CONFIG | jq -c '.')
+
+          # Merge each ECR image with its Docker Hub counterpart (via "from" field).
+          # ecr-push-action expects dockerfile as a repo-relative path. Docker Hub
+          # images[] stores dockerfile relative to context, so we join them and
+          # normalize (strip leading ./).
+          MATRIX=$(echo "$ECR_IMAGES" | jq -c --arg bc "$BUILD_CONFIG" --argjson docker "$DOCKER_IMAGES" '{
+            include: [.[] | . as $ecr |
+              ($docker | map(select(.name == $ecr.from)) | first // {}) as $base |
+              ($ecr.context // $base.context // ".") as $ctx |
+              (
+                $ecr.dockerfile // (
+                  ($ctx + "/" + ($base.dockerfile // "Dockerfile"))
+                  | gsub("^\\./"; "")
+                  | gsub("/+"; "/")
+                )
+              ) as $df |
+              {
+                ecr_repository: $ecr.ecr_repository,
+                context: $ctx,
+                dockerfile: $df,
+                build_config: (
+                  if ($ecr | has("build_config")) then $ecr.build_config
+                  elif ($base | has("build_config")) then $base.build_config
+                  else $bc
+                  end
+                )
+              }
+            ]
+          }')
+
+          echo "has_ecr=true" >> $GITHUB_OUTPUT
+          echo "ecr_matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  build:
+    needs: config
+    if: needs.config.outputs.has_ecr == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.config.outputs.ecr_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: qqcw/ecr-push-action@v2
+        with:
+          context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
+          ecr-repository: ${{ matrix.ecr_repository }}
+          tags: |
+            ${{ needs.config.outputs.tag }}
+            ${{ needs.config.outputs.extra_tag }}
+          build-args: |
+            BUILD_VERSION=${{ needs.config.outputs.tag }}
+            BUILD_GITHASH=${{ github.sha }}
+            ${{ matrix.build_config != '' && format('BUILD_CONFIG={0}', matrix.build_config) || '' }}
+            ${{ secrets.GH_PACKAGE_TOKEN != '' && format('GH_PACKAGE_TOKEN={0}', secrets.GH_PACKAGE_TOKEN) || '' }}

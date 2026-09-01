@@ -4,6 +4,12 @@ release_name: QSCM
 images:
   - name: quickquack/qscm
 
+ecr:
+  images:
+    - ecr_repository: qqcw/qscm
+      from: quickquack/qscm
+      build_config: ""            # QSCM ECR does not use BUILD_CONFIG
+
 tests:
   go:
     version: "1.25"

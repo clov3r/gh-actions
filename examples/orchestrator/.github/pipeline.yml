@@ -5,9 +5,17 @@ images:
   - name: quickquack/orchestrator
     context: ./orchestrator
     dockerfile: Dockerfile
+    build_config: ""              # Orchestrator service does not use BUILD_CONFIG
   - name: quickquack/orchestrator-bff
     context: .
     dockerfile: bff/Dockerfile
+
+ecr:
+  images:
+    - ecr_repository: qqcw/orchestrator
+      from: quickquack/orchestrator
+    - ecr_repository: qqcw/orchestrator-bff
+      from: quickquack/orchestrator-bff
 
 tests:
   go:

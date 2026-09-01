@@ -4,6 +4,11 @@ release_name: QSoap Config
 images:
   - name: quickquack/qsoap-config
 
+ecr:
+  images:
+    - ecr_repository: qqcw/qsoap-config
+      from: quickquack/qsoap-config
+
 tests:
   go:
     version: "1.25"

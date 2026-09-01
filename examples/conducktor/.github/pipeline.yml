@@ -8,6 +8,14 @@ images:
   - name: quickquack/conducktor
     context: ./client
     dockerfile: Dockerfile
+    build_config: ""              # Client image does not use BUILD_CONFIG
+
+ecr:
+  images:
+    - ecr_repository: qqcw/conducktor-bff
+      from: quickquack/conducktor-bff
+    - ecr_repository: qqcw/conducktor
+      from: quickquack/conducktor
 
 tests:
   go:

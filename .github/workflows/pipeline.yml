@@ -38,6 +38,7 @@ jobs:
       service_name: ${{ steps.parse.outputs.service_name }}
       release_name: ${{ steps.parse.outputs.release_name }}
       images_json: ${{ steps.enrich.outputs.images_json }}
+      ecr_deploy_repo: ${{ steps.parse.outputs.ecr_deploy_repo }}
       go_test_json: ${{ steps.parse.outputs.go_test_json }}
       node_test_json: ${{ steps.parse.outputs.node_test_json }}
       e2e_json: ${{ steps.parse.outputs.e2e_json }}
@@ -82,6 +83,12 @@ jobs:
           # Images — inject environment build_config into images that don't specify their own
           IMAGES_RAW=$(yq -o=json '.images' $CONFIG | jq -c '.')
           echo "images_json=$IMAGES_RAW" >> $GITHUB_OUTPUT
+
+          # ECR — find the deploy image (matches service_name, or last ECR image)
+          SVC=$(yq -r '.service_name' $CONFIG)
+          ECR_DEPLOY_REPO=$(yq -o=json '.ecr.images // []' $CONFIG | jq -r --arg svc "$SVC" \
+            '(.[] | select(.ecr_repository | endswith($svc))).ecr_repository // .[-1].ecr_repository // ""')
+          echo "ecr_deploy_repo=$ECR_DEPLOY_REPO" >> $GITHUB_OUTPUT
 
           # Tests
           GO_TEST=$(yq -o=json '.tests.go // null' $CONFIG | jq -c '.')
@@ -198,7 +205,7 @@ jobs:
               echo "run_build_check=false" >> $GITHUB_OUTPUT
               echo "extra_tag=latest" >> $GITHUB_OUTPUT
               echo "pre_release_branches=" >> $GITHUB_OUTPUT
-              echo "build_config_overrides=" >> $GITHUB_OUTPUT
+              echo "build_config_overrides=production" >> $GITHUB_OUTPUT
               ;;
           esac
 
@@ -497,7 +504,12 @@ jobs:
           CHANGELOG: ${{ steps.changelog.outputs.body }}
           PR_TOKEN: ${{ secrets.PR_OPENER }}
           IMAGES_JSON: ${{ needs.config.outputs.images_json }}
+          ECR_DEPLOY_REPO: ${{ needs.config.outputs.ecr_deploy_repo }}
         run: |
+          # ECR registries (images are pushed to dev, mirrored to prod automatically)
+          DEV_ECR="377740805472.dkr.ecr.us-east-2.amazonaws.com"
+          PROD_ECR="752897034123.dkr.ecr.us-east-2.amazonaws.com"
+
           # Determine the primary deploy image: match service_name, or fall back to last image
           PRIMARY_IMAGE=$(echo "$IMAGES_JSON" | jq -r --arg svc "$SERVICE_NAME" \
             '(.[] | select(.name | endswith($svc))).name // .[-1].name')
@@ -512,7 +524,16 @@ jobs:
             EXTRA_DESC=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].description // \"\"")
             AUTOMERGE=$(echo "$DEPLOY_ENVS" | jq -r ".[$i].automerge // true")
 
-            IMAGE="index.docker.io/${PRIMARY_IMAGE}:${VERSION}"
+            # Use ECR image URI if ecr config exists, otherwise fall back to Docker Hub
+            if [ -n "$ECR_DEPLOY_REPO" ]; then
+              if [ "$ENV" = "prod" ]; then
+                IMAGE="${PROD_ECR}/${ECR_DEPLOY_REPO}:${VERSION}"
+              else
+                IMAGE="${DEV_ECR}/${ECR_DEPLOY_REPO}:${VERSION}"
+              fi
+            else
+              IMAGE="index.docker.io/${PRIMARY_IMAGE}:${VERSION}"
+            fi
 
             echo "::group::Deploying to ${ENV} (${SVC})"
 
