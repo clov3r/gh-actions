@@ -1,0 +1,95 @@
+name: Sync branches
+
+on:
+  workflow_call:
+    inputs:
+      branches:
+        description: "JSON array of branch names to replay onto main (e.g. '[\"release/next\", \"dev\"]')"
+        type: string
+        default: '["release/next", "dev"]'
+    secrets:
+      PR_OPENER:
+        required: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(inputs.branches) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PR_OPENER }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync ${{ matrix.branch }} onto main
+        run: |
+          set -euo pipefail
+          BRANCH="${{ matrix.branch }}"
+
+          # ── Guard: branch must exist ──
+          if ! git rev-parse "origin/${BRANCH}" >/dev/null 2>&1; then
+            echo "::warning::Branch '${BRANCH}' does not exist — skipping"
+            exit 0
+          fi
+
+          # ── Guard: already up to date ──
+          if git merge-base --is-ancestor origin/main "origin/${BRANCH}"; then
+            echo "${BRANCH} already contains all of main — nothing to do"
+            exit 0
+          fi
+
+          # ── Collect commits on the branch that aren't on main ──
+          COMMITS=$(git rev-list --reverse "origin/main..origin/${BRANCH}")
+
+          if [ -z "$COMMITS" ]; then
+            echo "${BRANCH} has no unique commits beyond main — fast-forwarding"
+            git push origin "origin/main:refs/heads/${BRANCH}"
+            exit 0
+          fi
+
+          echo "Commits to replay onto main:"
+          for c in $COMMITS; do
+            TYPE="commit"
+            if [ "$(git cat-file -p "$c" | grep -c '^parent ')" -gt 1 ]; then
+              TYPE="merge "
+            fi
+            echo "  ${TYPE} $(git log --oneline -1 "$c")"
+          done
+
+          # ── Build new branch: start from main, replay each commit ──
+          git checkout -B sync-temp origin/main
+
+          for COMMIT in $COMMITS; do
+            PARENT_COUNT=$(git cat-file -p "$COMMIT" | grep -c '^parent ')
+
+            SHORT=$(git log --oneline -1 "$COMMIT")
+
+            if [ "$PARENT_COUNT" -gt 1 ]; then
+              echo "Cherry-picking merge: ${SHORT}"
+              if ! git cherry-pick -m 1 --no-edit "$COMMIT"; then
+                git cherry-pick --abort
+                echo "::error::Failed to replay merge commit ${SHORT} — resolve manually"
+                exit 1
+              fi
+            else
+              echo "Cherry-picking: ${SHORT}"
+              if ! git cherry-pick --no-edit "$COMMIT"; then
+                git cherry-pick --abort
+                echo "::error::Failed to replay commit ${SHORT} — resolve manually"
+                exit 1
+              fi
+            fi
+          done
+
+          # ── Push the result ──
+          git push --force-with-lease origin "sync-temp:refs/heads/${BRANCH}"
+          echo "Successfully synced ${BRANCH} — $(echo "$COMMITS" | wc -w | tr -d ' ') commits replayed on top of main"

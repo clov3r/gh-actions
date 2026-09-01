@@ -353,34 +353,93 @@ Tags created with `GITHUB_TOKEN` don't trigger other workflows (GitHub prevents 
 
 ## ECR Builds
 
-ECR workflows are NOT part of the shared pipeline. They remain in each repo and work via one of these patterns:
+ECR images are built via a shared reusable workflow. Each repo keeps thin tag-triggered callers.
 
-| Pattern | Repos | How It Works |
-|---------|-------|-------------|
-| **Tag-triggered** | QSCM, Orchestrator, QSoap Config, QSense Config | Pipeline creates tag with PAT → ECR workflow fires on `on: push: tags:` |
-| **workflow_call** | Conducktor | Workflow chains ECR after pipeline: `needs: pipeline` with `tag: ${{ needs.pipeline.outputs.version }}` |
-| **Branch-triggered** | QAlerts | Separate ECR workflow runs on same branch push alongside pipeline |
+### How It Works
 
-### Chaining ECR via workflow_call
+1. Pipeline creates a git tag with PAT (`PR_OPENER`) → triggers ECR workflow
+2. ECR workflow calls `qqcw/gh-actions/.github/workflows/ecr-build.yml`
+3. The reusable workflow reads `ecr.images[]` from the caller's `.github/pipeline.yml`
+4. Each ECR image inherits `context`, `dockerfile`, and `build_config` from its Docker Hub counterpart via the `from` field
+5. Environment is derived from the tag suffix (or passed explicitly)
 
-For repos using `workflow_call` ECR (like conducktor), the deploy workflow chains it:
+### Pipeline Config — ECR Section
 
 ```yaml
-jobs:
-  pipeline:
-    uses: qqcw/gh-actions/.github/workflows/pipeline.yml@v1
-    with:
-      environment: dev
-    secrets: inherit
+# Add to .github/pipeline.yml
+ecr:
+  images:
+    - ecr_repository: qqcw/my-service    # ECR repository name
+      from: quickquack/my-service         # Links to Docker Hub image for context/dockerfile/build_config
+    # Override build_config per ECR image:
+    - ecr_repository: qqcw/my-service-core
+      from: quickquack/my-service-core
+      build_config: ""                    # Opt out of environment BUILD_CONFIG
+```
 
+### ECR Caller Workflows
+
+**Dev/QA/RC** (`.github/workflows/build-ecr-dev.yaml`):
+```yaml
+name: Build ECR (dev)
+on:
+  push:
+    tags:
+      - 'v*-*'
+
+jobs:
   ecr:
-    needs: pipeline
-    uses: ./.github/workflows/build-ecr-dev.yaml
+    uses: qqcw/gh-actions/.github/workflows/ecr-build.yml@v1
+    secrets:
+      GH_PACKAGE_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}  # Only if repo needs it
+```
+
+**Production** (`.github/workflows/build-ecr-prod.yaml`):
+```yaml
+name: Build ECR (prod)
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - '!v*-*'
+
+jobs:
+  ecr:
+    uses: qqcw/gh-actions/.github/workflows/ecr-build.yml@v1
     with:
-      tag: ${{ needs.pipeline.outputs.version }}
-    permissions:
-      id-token: write
-      contents: read
+      environment: production
+    secrets:
+      GH_PACKAGE_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}  # Only if repo needs it
+```
+
+### Environment Derivation from Tags
+
+When `environment` is not passed, it's derived from the tag suffix:
+
+| Tag Pattern | Environment | BUILD_CONFIG | Extra Tag |
+|-------------|-------------|-------------|-----------|
+| `v1.2.3-dev.0` | dev | `staging.dev` | `latest-dev` |
+| `v1.2.3-release-next.1` | qa | `staging.qa` | `latest-qa` |
+| `v1.2.3-rc-*.0` | preproduction | `staging.pp` | `latest-rc` |
+| `v1.2.3` (no suffix) | production | `production` | `latest` |
+
+### ECR Registries and Deploy
+
+Deploy PRs in flux_apps use ECR image URIs (when `ecr.images[]` is configured):
+
+| Deploy Environment | ECR Registry |
+|-------------------|-------------|
+| dev, qa, preproduction | `377740805472.dkr.ecr.us-east-2.amazonaws.com` |
+| prod (production) | `752897034123.dkr.ecr.us-east-2.amazonaws.com` |
+
+Images are pushed to the dev registry. Production images are automatically mirrored from dev to prod. The prod kube cluster references the prod registry ARN.
+
+### ECR Permissions
+
+ECR caller workflows need:
+```yaml
+# Not needed in the caller — the reusable workflow declares its own permissions
+# The reusable workflow uses: id-token: write, contents: read
 ```
 
 ## Permissions
@@ -426,7 +485,7 @@ Skipped jobs (e.g., `deploy`, `release`, `version`) should NOT be required — t
 
 ## Migration Checklist
 
-1. Create `.github/pipeline.yml` with your service config
+1. Create `.github/pipeline.yml` with your service config (including `ecr.images[]` if applicable)
 2. Replace each workflow file with the thin trigger version
 3. For PR/test workflows: pass explicit secrets (not `secrets: inherit`)
 4. For deploy workflows: add `permissions: contents: write` and use `secrets: inherit`
@@ -436,7 +495,99 @@ Skipped jobs (e.g., `deploy`, `release`, `version`) should NOT be required — t
 8. Test on a PR branch first (`environment: pr`)
 9. Test each deploy environment (dev, qa, preproduction)
 10. Set up required status checks in branch protection
-11. Verify ECR builds still fire (tag-triggered repos need PAT for tagging)
+11. Replace ECR workflow files with thin callers to `ecr-build.yml` (see ECR Builds section)
+12. Verify ECR builds still fire (tag-triggered repos need PAT for tagging)
+
+## Branch Sync Workflow
+
+Keeps downstream branches (e.g. `release/next`, `dev`) in sync with `main` after each push. It replays all commits unique to the branch on top of the latest `main` — merge commits are cherry-picked with `-m 1` to preserve PR diffs, regular commits are cherry-picked directly. If any replay fails (conflict), the job aborts with no changes pushed.
+
+### Caller Workflow (`.github/workflows/sync-branches.yaml`)
+
+```yaml
+name: Sync branches
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    uses: qqcw/gh-actions/.github/workflows/sync-branches.yml@v1
+    with:
+      branches: '["release/next", "dev"]'
+    secrets:
+      PR_OPENER: ${{ secrets.PR_OPENER }}
+```
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `branches` | JSON string array | `["release/next", "dev"]` | Branches to replay onto main |
+
+### Behavior
+
+1. Finds all commits on the branch not reachable from `main` (`git rev-list --reverse main..branch`)
+2. Creates a new branch from `main`
+3. Replays each commit in order: cherry-pick for regular commits, cherry-pick `-m 1` for merge commits
+4. Force-pushes the result (with `--force-with-lease`)
+
+- Each branch is synced independently (parallel, `fail-fast: false`)
+- If a branch doesn't exist, it's skipped with a warning
+- If a branch already contains all of `main`, it's a no-op
+- If any cherry-pick fails (conflict), it aborts immediately — **no changes are pushed**
+
+### Branch Protection
+
+The target branches (`release/next`, `dev`) must **not** have the `non_fast_forward` rule, since this workflow force-pushes. The `pull_request` rule alone is sufficient to prevent humans from pushing directly — force-push is only used by this CI automation via `PR_OPENER`.
+
+## Gate Main Workflow
+
+Auto-approves PRs from `release/*` branches into `main` (so they can merge without manual approval). Closes PRs from any other branch with a comment directing them to `release/next`.
+
+**Note:** This cannot be a reusable `workflow_call` workflow — `pull_request` events don't grant sufficient permissions for reusable workflows with `pull-requests: write`. It must be an inline workflow in each repo.
+
+### Inline Workflow (`.github/workflows/gate-main.yaml`)
+
+```yaml
+name: Gate main
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Auto-approve release PR
+        if: startsWith(github.head_ref, 'release/')
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.PR_OPENER }}
+
+      - name: Checkout
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        uses: actions/checkout@v6
+
+      - name: Close non-release PR
+        if: ${{ !startsWith(github.head_ref, 'release/') }}
+        run: |
+          gh pr close ${{ github.event.number }} -c "Please open a PR against release/next, not main directly."
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+### How It Works
+
+- PR from `release/*` → `main`: auto-approved by `qqcw-ite` via `PR_OPENER`
+- PR from any other branch → `main`: closed with a comment
+
+This pairs with requiring >=1 approval on `main` — release PRs get the bot approval automatically, while direct PRs are rejected.
 
 ## Versioning
 

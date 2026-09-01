@@ -1,0 +1,10 @@
+name: Build ECR (dev)
+
+on:
+  push:
+    tags:
+      - 'v*-*'
+
+jobs:
+  ecr:
+    uses: qqcw/gh-actions/.github/workflows/ecr-build.yml@v1
